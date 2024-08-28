@@ -4,7 +4,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float32
 import math
 import numpy as np
-from simplex import *
+from sound_loc_controller.simplex import *
 import threading
 
 from epuck_driver_interfaces.action import SimpleMovement
@@ -38,7 +38,9 @@ def send_movement_goal(client, angle, distance):
     if not client.wait_for_server(5):
         raise Exception("Timeout on movement control action server")
     
-    return client.send_goal_async()
+
+    
+    return client.send_goal_async(goal_msg)
 
 
 class SoundLocController(Node):
@@ -47,31 +49,34 @@ class SoundLocController(Node):
         super().__init__('TeamController')
         
         
-        self.robot_ids = [0, 1, 2]
+        self.robot_ids = ["epuck"]
         self.robot_distance = 0.3  # in meters
         self.record_time = 3  # in seconds
         self.step_distance = 0.1  # in meter
-        self.declare_parameter('average_mic_amplitudes_per_robot', True)
+        
 
         self.prev_mov_dir = None
         self.is_converged = False
+        self.declare_parameter('average_mic_amplitudes_per_robot', True)
 
-        self.movement_controller_action_clients = [ActionClient(SimpleMovement, "{}/movement_goal".format(id)) for id in self.robot_ids]
+        self.movement_controller_action_clients = [ActionClient(self, SimpleMovement, "{}/movement_goal".format(id)) for id in self.robot_ids]
         self.get_audio_data_locations = get_triangle_positions if self.get_parameter('average_mic_amplitudes_per_robot') else self.get_individual_microphone_positions
 
         self.audio_data_collection_action_client = ActionClient(self, CollectSoundData, "sound_data_collection")
 
+
+
     def issue_triangle_translation(self, direction):
 
-        self.formation_translation_done.clear()
         d_theta = math.atan2(direction[1], direction[0])
 
         return [send_movement_goal(action_client, d_theta, self.step_distance) for action_client in self.movement_controller_action_clients]
  
     def init_audio_data_collection(self):
 
-        
-        self.audio_data_collection_action_client.send_goal_async()
+        goal_msg = CollectSoundData.Goal()
+        goal_msg.recording_time = self.record_time
+        return [self.audio_data_collection_action_client.send_goal_async(goal_msg)]
 
 
 
@@ -81,8 +86,8 @@ class SoundLocController(Node):
         
         #robot_avg_dBs = np.average(time_avg_dBs.reshape(-1, 3), axis=1)
         #robot_locs = get_triangle_positions(self.robot_distance)
-        audio_locations = self.get_audio_data_locations(element_distance)
-        microphone_data = [{"pos":audio_locations[i], "dB":robot_avg_dBs[i]} for i in range(len(robot_avg_dBs))]
+        audio_locations = self.get_audio_data_locations(self.robot_distance)
+        microphone_data = [{"pos":audio_locations[i], "dB":time_avg_dBs[i]} for i in range(len(time_avg_dBs))]
 
         separations = determine_sound_source_halfspaces(microphone_data, True)
         simplex = aggregate_separations_to_simplex(separations)
@@ -104,17 +109,17 @@ class SoundLocController(Node):
         pass
 
 
-    def wait_on_action_completion(goal_handle_futures):
+    def wait_on_action_completion(self, goal_handle_futures):
 
         result_fts_and_g_handles = []
         for goal_handle_future in goal_handle_futures:
             rclpy.spin_until_future_complete(self, goal_handle_future)
 
-            goal_handle = future.result()
+            goal_handle = goal_handle_future.result()
             if not goal_handle.accepted:
                 self.get_logger().info('Goal rejected :(')
             else:
-            result_fts_and_g_handles.append((goal_handle.get_result_async(), goal_handle))
+                result_fts_and_g_handles.append((goal_handle.get_result_async(), goal_handle))
 
         results = []
         for result_future, g_handle in result_fts_and_g_handles:
@@ -126,7 +131,7 @@ class SoundLocController(Node):
 
 
 
-    def main_control_loop(self, rate):
+    def main_control_loop(self):
 
         # 1. Stage: Optimize Formation
         # 2. Stage: Do soundlocalizaton and check convergence
@@ -137,11 +142,14 @@ class SoundLocController(Node):
 
         while not self.is_converged:
             
-            audio_data = wait_on_action_completion(self.init_audio_data_collection())
+            print("Initiating Audio data collection")
+            audio_data = self.wait_on_action_completion(self.init_audio_data_collection())
 
-            mov_dir = sound_localization(audio_data)
-
-            wait_on_action_completion(self.issue_triangle_translation(mov_dir))
+            print("Audio data collection done")
+            print("Doing sound localization")
+            mov_dir = self.sound_localization(audio_data)
+            print("Issueing move command: {}".format(mov_dir))
+            self.wait_on_action_completion(self.issue_triangle_translation(mov_dir))
 
 
              
@@ -159,7 +167,7 @@ def main(args=None):
 
     #rate = team_controller.create_rate(10)
     try:
-        team_controller.main_control_loop(rate)
+        team_controller.main_control_loop()
     except KeyboardInterrupt:
         pass
    
@@ -167,8 +175,7 @@ def main(args=None):
     # Destroy the node explicitly
     # (optional - otherwise it will be done automatically
     # when the garbage collector destroys the node object)
-    thread.join()
-    thread.destroy_node()
+    team_controller.destroy_node()
     rclpy.shutdown()
     
 
