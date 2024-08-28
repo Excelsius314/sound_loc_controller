@@ -52,7 +52,7 @@ class SoundLocController(Node):
         self.robot_ids = ["epuck"]
         self.robot_distance = 0.3  # in meters
         self.record_time = 3  # in seconds
-        self.step_distance = 0.1  # in meter
+        self.step_distance = 0.05  # in meter
         
 
         self.prev_mov_dir = None
