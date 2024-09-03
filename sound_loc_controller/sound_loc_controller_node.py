@@ -9,6 +9,7 @@ import threading
 
 from epuck_driver_interfaces.action import SimpleMovement
 from epuck_driver_interfaces.action import CollectSoundData
+from epuck_driver_interfaces.action import CalibrateFormation
 from rclpy.action import ActionClient
 
 def vector_from_angle(ori):
@@ -38,8 +39,6 @@ def send_movement_goal(client, angle, distance):
     if not client.wait_for_server(5):
         raise Exception("Timeout on movement control action server")
     
-
-    
     return client.send_goal_async(goal_msg)
 
 
@@ -49,17 +48,19 @@ class SoundLocController(Node):
         super().__init__('TeamController')
         
         
-        self.robot_ids = ["epuck"]
-        self.robot_distance = 0.3  # in meters
-        self.record_time = 3  # in seconds
-        self.step_distance = 0.05  # in meter
+        self.robot_ids = self.declare_parameter('robot_names', ["epuck1", "epuck2", "epuck3"]).get_parameter_value().string_array_value
+        self.robot_distance = self.declare_parameter('robot_distance', 0.1).get_parameter_value().double_value # in meters
+        self.record_time = self.declare_parameter('recording_time', 3).get_parameter_value().integer_value  # in seconds
+        self.step_distance = self.declare_parameter('step_distance', 0.1).get_parameter_value().double_value # in meters
+        self.declare_parameter('average_mic_amplitudes_per_robot', True)
         
 
         self.prev_mov_dir = None
         self.is_converged = False
-        self.declare_parameter('average_mic_amplitudes_per_robot', True)
 
         self.movement_controller_action_clients = [ActionClient(self, SimpleMovement, "{}/movement_goal".format(id)) for id in self.robot_ids]
+        self.formation_calibration_action_client = ActionClient(self, CalibrateFormation, "sound_data_collection_action_server")
+
         self.get_audio_data_locations = get_triangle_positions if self.get_parameter('average_mic_amplitudes_per_robot') else self.get_individual_microphone_positions
 
         self.audio_data_collection_action_client = ActionClient(self, CollectSoundData, "sound_data_collection")
@@ -69,15 +70,17 @@ class SoundLocController(Node):
     def issue_triangle_translation(self, direction):
 
         d_theta = math.atan2(direction[1], direction[0])
-
         return [send_movement_goal(action_client, d_theta, self.step_distance) for action_client in self.movement_controller_action_clients]
  
     def init_audio_data_collection(self):
-
         goal_msg = CollectSoundData.Goal()
         goal_msg.recording_time = self.record_time
         return [self.audio_data_collection_action_client.send_goal_async(goal_msg)]
 
+    def init_formation_calibration(self):
+        goal_msg = CalibrateFormation.Goal()
+        goal_msg.robot_distance = self.robot_distance
+        return [self.formation_calibration_action_client.send_goal_async(goal_msg)]
 
 
     # using averaging strategy for now
@@ -141,14 +144,17 @@ class SoundLocController(Node):
                     
 
         while not self.is_converged:
+
+            self.get_logger().info("Calibrate Formation")
+            self.wait_on_action_completion(self.init_formation_calibration())
             
-            print("Initiating Audio data collection")
+            self.get_logger().info("Initiating Audio data collection")
             audio_data = self.wait_on_action_completion(self.init_audio_data_collection())
 
-            print("Audio data collection done")
-            print("Doing sound localization")
+            self.get_logger().info("Audio data collection done")
+            self.get_logger().info("Doing sound localization")
             mov_dir = self.sound_localization(audio_data)
-            print("Issueing move command: {}".format(mov_dir))
+            self.get_logger().info("Issueing move command: {}".format(mov_dir))
             self.wait_on_action_completion(self.issue_triangle_translation(mov_dir))
 
 
